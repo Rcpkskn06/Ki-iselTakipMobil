@@ -1,9 +1,48 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'dart:convert';
 
-void main() {
+// Bildirim eklentisi nesnesi
+final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
+    FlutterLocalNotificationsPlugin();
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // Bildirim ayarları (Android için)
+  const AndroidInitializationSettings initializationSettingsAndroid =
+      AndroidInitializationSettings('@mipmap/ic_launcher');
+
+  const InitializationSettings initializationSettings =
+      InitializationSettings(android: initializationSettingsAndroid);
+
+  await flutterLocalNotificationsPlugin.initialize(initializationSettings);
+
   runApp(const AliskanlikTakipApp());
+}
+
+// Bildirim gönderme fonksiyonu
+Future<void> bildirimGonder(String baslik, String aciklama) async {
+  const AndroidNotificationDetails androidPlatformChannelSpecifics =
+      AndroidNotificationDetails(
+    'aliskanlik_kanal_id',
+    'Alışkanlık Bildirimleri',
+    channelDescription: 'Alışkanlık hatırlatıcı bildirimleri',
+    importance: Importance.max,
+    priority: Priority.high,
+    ticker: 'ticker',
+  );
+
+  const NotificationDetails platformChannelSpecifics =
+      NotificationDetails(android: androidPlatformChannelSpecifics);
+
+  await flutterLocalNotificationsPlugin.show(
+    0,
+    baslik,
+    aciklama,
+    platformChannelSpecifics,
+  );
 }
 
 class AliskanlikTakipApp extends StatefulWidget {
@@ -26,7 +65,7 @@ class _AliskanlikTakipAppState extends State<AliskanlikTakipApp> {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Alışkanlık Takip',
+      title: 'Pro Alışkanlık Takip',
       themeMode: _isDarkMode ? ThemeMode.dark : ThemeMode.light,
       theme: ThemeData(
         primarySwatch: Colors.blue,
@@ -51,12 +90,14 @@ class Aliskanlik {
   bool tamamlandi;
   int streak;
   String kategori;
+  String sonTamamlananTarih;
 
   Aliskanlik({
     required this.isim,
     this.tamamlandi = false,
     this.streak = 0,
     this.kategori = 'Genel',
+    this.sonTamamlananTarih = '',
   });
 
   Map<String, dynamic> toJson() => {
@@ -64,6 +105,7 @@ class Aliskanlik {
         'tamamlandi': tamamlandi,
         'streak': streak,
         'kategori': kategori,
+        'sonTamamlananTarih': sonTamamlananTarih,
       };
 
   factory Aliskanlik.fromJson(Map<String, dynamic> json) => Aliskanlik(
@@ -71,6 +113,7 @@ class Aliskanlik {
         tamamlandi: json['tamamlandi'] ?? false,
         streak: json['streak'] ?? 0,
         kategori: json['kategori'] ?? 'Genel',
+        sonTamamlananTarih: json['sonTamamlananTarih'] ?? '',
       );
 }
 
@@ -90,27 +133,63 @@ class _AnaSayfaState extends State<AnaSayfa> {
   String _secilenKategori = 'Spor';
   final List<String> _kategoriler = ['Spor', 'Sağlık', 'Eğitim', 'Kişisel', 'Genel'];
 
-  // Sabit anahtar ismi (Verilerin kaybolmasını önler)
   static const String _storageKey = 'aliskanliklar_ana_liste';
+  static const String _tarihKey = 'son_giris_tarihi';
 
   @override
   void initState() {
     super.initState();
-    _verileriYukle();
+    _verileriYukleVeKontrolEt();
+  }
+
+  String _bugununTarihi() {
+    final simdi = DateTime.now();
+    return "${simdi.year}-${simdi.month.toString().padLeft(2, '0')}-${simdi.day.toString().padLeft(2, '0')}";
   }
 
   Future<void> _verileriKaydet() async {
     final prefs = await SharedPreferences.getInstance();
     List<String> listeJson = _aliskanliklar.map((a) => jsonEncode(a.toJson())).toList();
     await prefs.setStringList(_storageKey, listeJson);
+    await prefs.setString(_tarihKey, _bugununTarihi());
   }
 
-  Future<void> _verileriYukle() async {
+  Future<void> _verileriYukleVeKontrolEt() async {
     final prefs = await SharedPreferences.getInstance();
     List<String>? listeJson = prefs.getStringList(_storageKey);
+    String? sonGiris = prefs.getString(_tarihKey);
+    String bugun = _bugununTarihi();
+
     if (listeJson != null) {
       setState(() {
         _aliskanliklar = listeJson.map((item) => Aliskanlik.fromJson(jsonDecode(item))).toList();
+        
+        // Eğer yeni bir güne geçildiyse kontrol yap
+        if (sonGiris != null && sonGiris != bugun) {
+          bool kacirilanVarMi = false;
+
+          for (var aliskanlik in _aliskanliklar) {
+            // Eğer dün yapılmadıysa seri yanar
+            if (aliskanlik.sonTamamlananTarih != sonGiris) {
+              aliskanlik.streak = 0;
+              kacirilanVarMi = true;
+            }
+            // Yeni gün için tiki kaldır
+            aliskanlik.tamamlandi = false;
+          }
+          
+          _verileriKaydet();
+
+          // OTOMATİK BİLDİRİM: Dün kaçırılan alışkanlık varsa otomatik tetikle
+          if (kacirilanVarMi) {
+            Future.delayed(const Duration(seconds: 2), () {
+              bildirimGonder(
+                "Seri Tehlikede! 🔥",
+                "Dün bazı alışkanlıklarını tamamlamadın ve serin sıfırlandı. Bugün yeni bir başlangıç yap!",
+              );
+            });
+          }
+        }
       });
     }
   }
@@ -206,7 +285,7 @@ class _AnaSayfaState extends State<AnaSayfa> {
             children: [
               Text('• Toplam Alışkanlık: $toplam', style: const TextStyle(fontSize: 16)),
               const SizedBox(height: 8),
-              Text('• Tamamlanan: $tamamlanan', style: const TextStyle(fontSize: 16)),
+              Text('• Bugün Tamamlanan: $tamamlanan', style: const TextStyle(fontSize: 16)),
               const SizedBox(height: 8),
               Text('• Toplam Seri Puanı: 🔥 $toplamStreak', style: const TextStyle(fontSize: 16)),
             ],
@@ -232,6 +311,16 @@ class _AnaSayfaState extends State<AnaSayfa> {
       appBar: AppBar(
         title: const Text('Pro Alışkanlık Takip'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.notifications_active),
+            onPressed: () {
+              bildirimGonder(
+                "Hatırlatıcı 🔔",
+                "Bugünkü alışkanlıklarını henüz tamamlamadın!",
+              );
+            },
+            tooltip: 'Bildirim Test Et',
+          ),
           IconButton(
             icon: const Icon(Icons.bar_chart),
             onPressed: _istatistikleriGoster,
@@ -292,8 +381,10 @@ class _AnaSayfaState extends State<AnaSayfa> {
                                 aliskanlik.tamamlandi = deger ?? false;
                                 if (aliskanlik.tamamlandi) {
                                   aliskanlik.streak += 1;
+                                  aliskanlik.sonTamamlananTarih = _bugununTarihi();
                                 } else {
                                   if (aliskanlik.streak > 0) aliskanlik.streak -= 1;
+                                  aliskanlik.sonTamamlananTarih = '';
                                 }
                               });
                               _verileriKaydet();
@@ -315,7 +406,7 @@ class _AnaSayfaState extends State<AnaSayfa> {
                                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                                 decoration: BoxDecoration(
                                   color: renk.withOpacity(0.2),
-                                  borderRadius: BorderRadius.circular(8),
+                                  borderRadius: BorderRadius.circular(5),
                                 ),
                                 child: Text(
                                   aliskanlik.kategori,
